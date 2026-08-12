@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>月相羅針 計算PoC v0.7｜Vue.js画面版</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='0.7') }}">
+</head>
+<body>
+  <main id="app" class="page-shell" v-cloak>
+    <header class="hero">
+      <p class="eyebrow">春華プロジェクト｜技術検証</p>
+      <h1>月相羅針 計算PoC v0.7</h1>
+      <p class="lead">出生情報から太陽・月の黄経と角度差をPythonで計算し、Vue.jsが結果を表示します。出生時間が不明な場合は、出生日全体から候補を確認します。</p>
+    </header>
+
+    <section class="notice" aria-label="重要なお知らせ">
+      <strong>重要：</strong>
+      この画面のP01〜P08・標準月相名称・説明文章、および出生時間不明時の候補判定方式は、春華独自の「月相羅針」の正式仕様ではありません。
+      360°を45°ずつ8等分したPoC技術検証用の暫定仕様です。
+    </section>
+
+    <section class="card">
+      <h2>出生情報を入力</h2>
+
+      <div v-if="errors.length" class="error-box" role="alert">
+        <strong>入力または計算内容を確認してください。</strong>
+        <ul>
+          <li v-for="(error, index) in errors" :key="index" v-text="error"></li>
+        </ul>
+      </div>
+
+      <form class="birth-form" autocomplete="off" novalidate @submit.prevent="calculate" @reset="resetForm">
+        <div class="form-grid">
+          <label>
+            <span>生年月日</span>
+            <input
+              v-model="form.birth_date"
+              type="date"
+              name="birth_date"
+              autocomplete="off"
+              required
+              @pointerdown="primeCurrentDateIfEmpty"
+              @focus="primeCurrentDateIfEmpty"
+            >
+          </label>
+
+          <label>
+            <span>出生時間</span>
+            <input
+              v-model="form.birth_time"
+              type="time"
+              name="birth_time"
+              autocomplete="off"
+              @pointerdown="primeCurrentTimeIfEmpty"
+              @focus="primeCurrentTimeIfEmpty"
+            >
+            <small>出生時間が分からない場合は、空欄のままで構いません。</small>
+          </label>
+
+          <label class="full-width">
+            <span>出生地</span>
+            <input
+              v-model="form.birth_place"
+              type="text"
+              name="birth_place"
+              placeholder="例：兵庫県小野市"
+              autocomplete="off"
+              required
+            >
+            <small>PoC v0.7では日本国内として Asia/Tokyo を使用します。</small>
+          </label>
+        </div>
+
+        <button type="submit" :disabled="loading" :aria-busy="loading ? 'true' : 'false'" v-text="loading ? '計算中...' : '計算する'"></button>
+      </form>
+    </section>
+
+    <template v-if="result">
+      <section v-if="result.birth_time_known" class="card result-card" aria-live="polite">
+        <div class="result-heading">
+          <div>
+            <p class="eyebrow">あなたの月相</p>
+            <h2 v-text="phaseTitle(result)"></h2>
+            <p v-text="result.phase_english_name"></p>
+          </div>
+          <span class="provisional-badge">PoC標準月相</span>
+        </div>
+
+        <dl class="result-list">
+          <div><dt>月相分類</dt><dd v-text="phaseTitle(result)"></dd></div>
+          <div><dt>出生データ</dt><dd v-text="result.birth_data"></dd></div>
+          <div><dt>タイムゾーン</dt><dd v-text="result.timezone"></dd></div>
+          <div><dt>UTC日時</dt><dd v-text="result.utc_datetime"></dd></div>
+          <div><dt>ユリウス日</dt><dd v-text="formatNumber(result.julian_day)"></dd></div>
+          <div><dt>太陽黄経</dt><dd v-text="formatDegrees(result.sun_longitude)"></dd></div>
+          <div><dt>月黄経</dt><dd v-text="formatDegrees(result.moon_longitude)"></dd></div>
+          <div><dt>太陽と月の角度差</dt><dd v-text="formatDegrees(result.angle_difference)"></dd></div>
+          <div><dt>PoC分類ID</dt><dd v-text="result.phase_id"></dd></div>
+          <div><dt>標準月相名称</dt><dd v-text="phaseNameWithEnglish(result)"></dd></div>
+          <div><dt>分類角度範囲</dt><dd v-text="result.phase_range"></dd></div>
+        </dl>
+
+        <div class="phase-description">
+          <h3>月相の説明（PoC用）</h3>
+          <p v-text="result.phase_description"></p>
+          <p><strong>注意：</strong><span v-text="result.phase_note"></span></p>
+        </div>
+
+        <p class="calculation-note">
+          計算は地心・トロピカル黄経を使用。計算エンジン：<span v-text="result.ephemeris_mode"></span>。
+        </p>
+      </section>
+
+      <section v-else class="card result-card" aria-live="polite">
+        <div class="result-heading">
+          <div>
+            <p class="eyebrow">出生時間不明</p>
+            <template v-if="result.classification_status === 'stable'">
+              <h2>一日を通して同じ月相区分でした</h2>
+              <p>出生日全体を確認した結果、候補は1つです。</p>
+            </template>
+            <template v-else>
+              <h2>出生時刻によって月相区分が変わる可能性があります</h2>
+              <p>1つに確定せず、出生日内で確認できた候補を表示します。</p>
+            </template>
+          </div>
+          <span class="provisional-badge">PoC暫定判定</span>
+        </div>
+
+        <div class="candidate-list">
+          <article v-for="(phase, index) in result.possible_phases" :key="phase.id" class="candidate-card">
+            <p class="candidate-label" v-text="candidateLabel(index, result.possible_phases.length)"></p>
+            <h3 v-text="phase.id + '｜' + phase.name"></h3>
+            <p class="candidate-english" v-text="phase.englishName"></p>
+            <p v-text="phase.description"></p>
+            <p class="candidate-range">技術検証用区分：<span v-text="phase.rangeText"></span></p>
+          </article>
+        </div>
+
+        <div v-if="result.classification_status === 'ambiguous'" class="guidance-box">
+          正確な出生時間が分かる場合は、出生時間を再入力すると1つの区分として計算できます。
+        </div>
+
+        <dl class="result-list compact-result-list">
+          <div><dt>判定状態</dt><dd v-text="result.classification_status"></dd></div>
+          <div><dt>出生日・出生地</dt><dd v-text="result.birth_date + ' ' + result.birth_place"></dd></div>
+          <div><dt>タイムゾーン</dt><dd v-text="result.timezone"></dd></div>
+          <div><dt>確認時刻範囲</dt><dd v-text="result.check_period"></dd></div>
+          <div><dt>日内確認方法</dt><dd v-text="unknownTimeSamplingText(result)"></dd></div>
+          <div><dt>確認点数</dt><dd v-text="result.sample_count + '点'"></dd></div>
+          <div><dt>角度差（00:00）</dt><dd v-text="formatDegrees(result.start_angle_difference)"></dd></div>
+          <div><dt>角度差（23:59:59）</dt><dd v-text="formatDegrees(result.end_angle_difference)"></dd></div>
+        </dl>
+
+        <div class="phase-description warning-description">
+          <h3>出生時間不明時の扱いについて</h3>
+          <p v-text="result.unknown_time_note"></p>
+          <p><strong>注意：</strong>仮の正午などを出生時刻として設定し、1区分に確定する処理は行っていません。</p>
+        </div>
+
+        <p class="calculation-note">
+          計算は地心・トロピカル黄経を使用。計算エンジン：<span v-text="result.ephemeris_mode"></span>。
+        </p>
+      </section>
+    </template>
+
+    <footer>
+      <p>月相羅針 計算PoC v0.7｜正式占術仕様を確定するものではありません。</p>
+    </footer>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.prod.js" defer></script>
+  <script src="{{ url_for('static', filename='app.js', v='0.7') }}" defer></script>
+</body>
+</html>
